@@ -180,41 +180,52 @@ class MotionCorrection(dj.Imported):
     class RigidMotionCorrection(dj.Part):
         definition = """ 
         -> master
-        -> ScanInfo.Field
         ---
         outlier_frames=null             : longblob      # mask with true for frames with outlier shifts (already corrected)
         y_shifts                        : longblob      # (pixels) y motion correction shifts
         x_shifts                        : longblob      # (pixels) x motion correction shifts
+        z_shifts=null                   : longblob      # (pixels) z motion correction shifts (z-drift) 
         y_std                           : float         # (pixels) standard deviation of y shifts across all frames
         x_std                           : float         # (pixels) standard deviation of x shifts across all frames
-        z_drift=null                    : longblob      # z-drift over frame of this Field (plane)
+        z_std=null                      : float         # (pixels) standard deviation of z shifts across all frames
         """
-
+    class RigidMotionCorrectionField(dj.Part):
+        definition = """ 
+        -> master.RigidMotionCorrection
+        -> ScanInfo.Field
+        """
     class NonRigidMotionCorrection(dj.Part):
         """ Piece-wise rigid motion correction - tile the FOV into multiple 2D blocks/patches"""
         definition = """ 
         -> master
-        -> ScanInfo.Field
         ---
         outlier_frames=null             : longblob      # mask with true for frames with outlier shifts (already corrected)
         block_height                    : int           # (px)
         block_width                     : int           # (px)
+        block_depth=null                : int           # (px)
         block_count_y                   : int           # number of blocks tiled in the y direction
         block_count_x                   : int           # number of blocks tiled in the x direction
-        z_drift=null                    : longblob      # z-drift over frame of this Field (plane)
+        block_count_z=null              : int           # number of blocks tiled in the z direction
+        """    
+    class NonRigidMotionCorrectionField(dj.Part):
+        definition = """ 
+        -> master.NonRigidMotionCorrection
+        -> ScanInfo.Field
         """
-
     class Block(dj.Part):
         definition = """  # FOV-tiled blocks used for non-rigid motion correction
         -> master.NonRigidMotionCorrection
         block_id                        : int
         ---
-        block_y                         : longblob      # (y_start, y_end) in pixel of this block
         block_x                         : longblob      # (x_start, x_end) in pixel of this block
-        y_shifts                        : longblob      # (pixels) y motion correction shifts for every frame
+        block_y                         : longblob      # (y_start, y_end) in pixel of this block
+        block_z=null                    : longblob      # (z_start, z_end) in pixel of this block
         x_shifts                        : longblob      # (pixels) x motion correction shifts for every frame
-        y_std                           : float         # (pixels) standard deviation of y shifts across all frames
+        y_shifts                        : longblob      # (pixels) y motion correction shifts for every frame
+        z_shifts=null                   : longblob      # (pixels) z motion correction shifts for every frame
         x_std                           : float         # (pixels) standard deviation of x shifts across all frames
+        y_std                           : float         # (pixels) standard deviation of y shifts across all frames
+        z_std=null                      : float         # (pixels) standard deviation of z shifts across all frames
         """
 
     class Summary(dj.Part):
@@ -287,32 +298,69 @@ class MotionCorrection(dj.Imported):
 
             # -- rigid motion correction --
             if not loaded_cm.params.motion['pw_rigid']:
-                rigid_mc = {'y_shifts': loaded_cm.motion_correction['shifts_rig'][:, 1],
-                            'x_shifts': loaded_cm.motion_correction['shifts_rig'][:, 0],
-                            'y_std': np.nanstd(loaded_cm.motion_correction['shifts_rig'][:, 1]),
-                            'x_std': np.nanstd(loaded_cm.motion_correction['shifts_rig'][:, 0]),
-                            'outlier_frames': None}
+                if loaded_cm.params.motion['is3D']:
+                    rigid_mc = {'x_shifts': loaded_cm.motion_correction['shifts_rig'][:, 0],
+                                'y_shifts': loaded_cm.motion_correction['shifts_rig'][:, 1],
+                                'z_shifts': loaded_cm.motion_correction['shifts_rig'][:, 2],
+                                'x_std': np.nanstd(loaded_cm.motion_correction['shifts_rig'][:, 0]),
+                                'y_std': np.nanstd(loaded_cm.motion_correction['shifts_rig'][:, 1]),
+                                'z_std': np.nanstd(loaded_cm.motion_correction['shifts_rig'][:, 2]),
+                                'outlier_frames': None}
+                else:
+                    rigid_mc = {'x_shifts': loaded_cm.motion_correction['shifts_rig'][:, 0],
+                                'y_shifts': loaded_cm.motion_correction['shifts_rig'][:, 1],
+                                'z_shifts': None,
+                                'x_std': np.nanstd(loaded_cm.motion_correction['shifts_rig'][:, 0]),
+                                'y_std': np.nanstd(loaded_cm.motion_correction['shifts_rig'][:, 1]),
+                                'z_std': None,
+                                'outlier_frames': None}
 
                 self.RigidMotionCorrection.insert1({**mc_key, **rigid_mc})
 
             # -- non-rigid motion correction --
             else:
-                nonrigid_mc = {'block_height': loaded_cm.params.motion['strides'][0] + loaded_cm.params.motion['overlaps'][0],
-                               'block_width': loaded_cm.params.motion['strides'][1] + loaded_cm.params.motion['overlaps'][1],
-                               'block_count_y': len(set(loaded_cm.motion_correction['coord_shifts_els'][:, 2])),
-                               'block_count_x': len(set(loaded_cm.motion_correction['coord_shifts_els'][:, 0])),
-                               'outlier_frames': None}
- 
+                if loaded_cm.params.motion['is3D']:
+                    nonrigid_mc = {'block_height': loaded_cm.params.motion['strides'][0] + loaded_cm.params.motion['overlaps'][0],
+                                'block_width': loaded_cm.params.motion['strides'][1] + loaded_cm.params.motion['overlaps'][1],
+                                'block_depth': loaded_cm.params.motion['strides'][2] + loaded_cm.params.motion['overlaps'][2],
+                                'block_count_x': len(set(loaded_cm.motion_correction['coord_shifts_els'][:, 0])),
+                                'block_count_y': len(set(loaded_cm.motion_correction['coord_shifts_els'][:, 2])),
+                                'block_count_z': len(set(loaded_cm.motion_correction['coord_shifts_els'][:, 4])),
+                                'outlier_frames': None}
+                else:
+                    nonrigid_mc = {'block_height': loaded_cm.params.motion['strides'][0] + loaded_cm.params.motion['overlaps'][0],
+                                'block_width': loaded_cm.params.motion['strides'][1] + loaded_cm.params.motion['overlaps'][1],
+                                'block_depth': None,
+                                'block_count_x': len(set(loaded_cm.motion_correction['coord_shifts_els'][:, 0])),
+                                'block_count_y': len(set(loaded_cm.motion_correction['coord_shifts_els'][:, 2])),
+                                'block_count_z': None,
+                                'outlier_frames': None}
+
                 nr_blocks = []
                 for b_id in range(len(loaded_cm.motion_correction['x_shifts_els'][0, :])):
-                    nr_blocks.append({**mc_key, 'block_id': b_id,
-                                      'block_y': loaded_cm.motion_correction['coord_shifts_els'][b_id, 2:4],
-                                      'block_x': loaded_cm.motion_correction['coord_shifts_els'][b_id, 0:2],
-                                      'y_shifts': loaded_cm.motion_correction['y_shifts_els'][:, b_id],
-                                      'x_shifts': loaded_cm.motion_correction['x_shifts_els'][:, b_id],
-                                      'y_std': np.nanstd(loaded_cm.motion_correction['y_shifts_els'][:, b_id]),
-                                      'x_std': np.nanstd(loaded_cm.motion_correction['x_shifts_els'][:, b_id])})
-                    
+                    if loaded_cm.params.motion['is3D']:
+                        nr_blocks.append({**mc_key, 'block_id': b_id,
+                                        'block_x': loaded_cm.motion_correction['coord_shifts_els'][b_id, 0:2],
+                                        'block_y': loaded_cm.motion_correction['coord_shifts_els'][b_id, 2:4],
+                                        'block_z': loaded_cm.motion_correction['coord_shifts_els'][b_id, 4:6],
+                                        'x_shifts': loaded_cm.motion_correction['x_shifts_els'][:, b_id],
+                                        'y_shifts': loaded_cm.motion_correction['y_shifts_els'][:, b_id],
+                                        'z_shifts': loaded_cm.motion_correction['z_shifts_els'][:, b_id],
+                                        'x_std': np.nanstd(loaded_cm.motion_correction['x_shifts_els'][:, b_id]),
+                                        'y_std': np.nanstd(loaded_cm.motion_correction['y_shifts_els'][:, b_id]),
+                                        'z_std': np.nanstd(loaded_cm.motion_correction['z_shifts_els'][:, b_id])})
+                    else:
+                        nr_blocks.append({**mc_key, 'block_id': b_id,
+                                        'block_x': loaded_cm.motion_correction['coord_shifts_els'][b_id, 0:2],
+                                        'block_y': loaded_cm.motion_correction['coord_shifts_els'][b_id, 2:4],
+                                        'block_z': None,
+                                        'x_shifts': loaded_cm.motion_correction['x_shifts_els'][:, b_id],
+                                        'y_shifts': loaded_cm.motion_correction['y_shifts_els'][:, b_id],
+                                        'z_shifts': None,
+                                        'x_std': np.nanstd(loaded_cm.motion_correction['x_shifts_els'][:, b_id]),
+                                        'y_std': np.nanstd(loaded_cm.motion_correction['y_shifts_els'][:, b_id]),
+                                        'z_std': None})
+
                 self.NonRigidMotionCorrection.insert1({**mc_key, **nonrigid_mc})
                 self.Block.insert(nr_blocks)
 

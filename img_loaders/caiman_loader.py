@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime
 import os
 import pathlib
+from tqdm import tqdm
 
 
 _required_hdf5_fields = ['/motion_correction/reference_image',
@@ -20,7 +21,7 @@ class CaImAn:
     Expecting the following objects:
     - 'dims':                 
     - 'dview':                
-    - 'estimates':            
+    - 'estimates':              Segmentations and traces
     - 'mmap_file':            
     - 'params':                 Input parameters
     - 'remove_very_bad_comps': 
@@ -94,14 +95,14 @@ class CaImAn:
         return masks
 
 
-def process_scanimage_tiff(scan_filenames, output_dir='./'):
+def split_tiff_channels(scan_filenames, output_dir='./'):
     """
-    Read scanimage tiffs - reshape into volumetric data based on scanning depths and channels
-    Save new `tif` files for each channel - with shape (frame x height x width x depth)
+    Read ScanImage TIFF
+    Reshape into volumetric data based on scanning depths and channels
+    Save new TIFF files for each channel with shape: frame x height x width x depth
     """
     from skimage.external.tifffile import imsave
     import scanreader
-    from tqdm import tqdm
 
     # ============ CaImAn multi-channel multi-plane tiff file ==============
     for scan_filename in tqdm(scan_filenames):
@@ -126,11 +127,26 @@ def process_scanimage_tiff(scan_filenames, output_dir='./'):
 
         for chn_idx in range(scan.num_channels):
             chn_vol = vol_timeseries[:, :, :, 0, :].transpose(3, 1, 2, 0)  # (frame x height x width x depth)
-            save_fp = output_dir / 'chn{}_{}.tif'.format(chn_idx, fname)
+            save_fp = output_dir / '{}_chn{}.tif'.format(fname, chn_idx)
             imsave(save_fp.as_posix(), chn_vol)
 
 
-def save_mc(mc, caiman_fp):
+def split_tiff_frames(input_file):
+    """
+    To maximize CaImAn efficiency, split TIFF file to smaller files based on the frames
+    https://caiman.readthedocs.io/en/master/On_file_types_and_sizes.html
+    """
+    import sys
+    m			=	cm.load(input_file)		# Load file
+    T			=	m.shape[0]				# Total number of frames for the file
+    L			=	1000					# Individual file length
+    fileparts	=	input_file.split('.')
+
+    for t in tqdm(np.arange(0,T,L)):
+        m[t:t+L].save((".").join(fileparts[:-1]) + '_' + str(t//L) + '.' + fileparts[-1])
+
+
+def save_mc(mc, caiman_fp, is3D):
     """
     DataJoint Imaging Element - CaImAn Integration
     Run these commands after the CaImAn analysis has completed.
@@ -147,20 +163,43 @@ def save_mc(mc, caiman_fp):
     """
 
     # Load motion corrected mmap image
-    mc_image = cm.load(mc.mmap_file)
+    mc_image = cm.load(mc.mmap_file, is3D=is3D)
 
     # Compute motion corrected summary images
     average_image = np.mean(mc_image, axis=0)
     max_image = np.max(mc_image, axis=0)
 
     # Compute motion corrected correlation image
-    correlation_image = cm.local_correlations(mc_image.transpose(1,2,0))
+    if is3D:
+        correlation_image = cm.local_correlations(mc_image.transpose(1,2,3,0))
+    else:
+        correlation_image = cm.local_correlations(mc_image.transpose(1,2,0))
     correlation_image[np.isnan(correlation_image)] = 0
 
-    # Compute mc.coord_shifts_els
-    xy_grid = []
-    for _, _, x, y, _ in cm.motion_correction.sliding_window(mc_image[0,:,:], mc.overlaps, mc.strides):
-        xy_grid.append([x, x + mc.overlaps[0] + mc.strides[0], y, y + mc.overlaps[1] + mc.strides[1]])
+    # from matplotlib import pyplot
+    # pyplot.figure()
+    # pyplot.imshow(average_image[:,:,0])
+    # pyplot.figure()
+    # pyplot.imshow(average_image[:,:,1])
+    # pyplot.figure()
+    # pyplot.imshow(average_image[:,:,2])
+
+    # pyplot.figure()
+    # pyplot.imshow(correlation_image[:,:,0])
+    # pyplot.figure()
+    # pyplot.imshow(correlation_image[:,:,1])
+    # pyplot.figure()
+    # pyplot.imshow(correlation_image[:,:,2])
+    # pyplot.show()
+
+    # Compute patch coordinates as mc.coord_shifts_els object is None
+    grid = []
+    if is3D:
+        for _, _, _, x, y, z, _ in cm.motion_correction.sliding_window_3d(mc_image[0,:,:,:], mc.overlaps, mc.strides):
+            grid.append([x, x + mc.overlaps[0] + mc.strides[0], y, y + mc.overlaps[1] + mc.strides[1], z, z + mc.overlaps[2] + mc.strides[2]])
+    else:
+        for _, _, x, y, _ in cm.motion_correction.sliding_window(mc_image[0,:,:], mc.overlaps, mc.strides):
+            grid.append([x, x + mc.overlaps[0] + mc.strides[0], y, y + mc.overlaps[1] + mc.strides[1]])
 
     # Open hdf5 file and create 'motion_correction' group
     h5f = h5py.File(caiman_fp, 'r+')
@@ -170,11 +209,13 @@ def save_mc(mc, caiman_fp):
     if mc.pw_rigid:
         h5g.require_dataset("x_shifts_els", shape=np.shape(mc.x_shifts_els), data=mc.x_shifts_els, dtype=mc.x_shifts_els[0][0].dtype)
         h5g.require_dataset("y_shifts_els", shape=np.shape(mc.y_shifts_els), data=mc.y_shifts_els, dtype=mc.y_shifts_els[0][0].dtype)
-        h5g.require_dataset("coord_shifts_els", shape=np.shape(xy_grid), data=xy_grid, dtype=type(xy_grid[0][0]))
+        h5g.require_dataset("coord_shifts_els", shape=np.shape(grid), data=grid, dtype=type(grid[0][0]))
         h5g.require_dataset("reference_image", shape=np.shape(mc.total_template_els), data=mc.total_template_els, dtype=mc.total_template_els.dtype)
+        if is3D:
+            h5g.require_dataset("z_shifts_els", shape=np.shape(mc.z_shifts_els), data=mc.z_shifts_els, dtype=mc.z_shifts_els[0][0].dtype)
     else:
         h5g.require_dataset("shifts_rig", shape=np.shape(mc.shifts_rig), data=mc.shifts_rig, dtype=mc.shifts_rig[0].dtype)
-        h5g.require_dataset("coord_shifts_rig", shape=np.shape(xy_grid), data=xy_grid, dtype=type(xy_grid[0][0]))
+        h5g.require_dataset("coord_shifts_rig", shape=np.shape(grid), data=grid, dtype=type(grid[0][0]))
         h5g.require_dataset("reference_image", shape=np.shape(mc.total_template_rig), data=mc.total_template_rig, dtype=mc.total_template_rig.dtype)
 
     h5g.require_dataset("correlation_image", shape=np.shape(correlation_image), data=correlation_image, dtype=correlation_image.dtype)

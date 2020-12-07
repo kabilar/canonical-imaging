@@ -60,4 +60,4 @@ For mesoscope scanner, with much wider FOV, there may be multiple fields on one 
 
 ## Usage
 
-See [this project](https://github.com/vathes/canonical-full-imaging-pipeline) for an example usage of this imaging pipeline element.
+See [workflow-imaging](https://github.com/vathes/canonical-full-imaging-pipeline) for an example usage of this imaging pipeline element.
